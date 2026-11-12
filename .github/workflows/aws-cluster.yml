@@ -1,0 +1,41 @@
+name: aws-cluster
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  cluster:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      AWS_REGION: eu-north-1
+      CLUSTER: platform-tenants
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assume role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: eu-north-1
+          role-duration-seconds: 14400
+
+      - name: Install tools
+        run: |
+          curl -fsSL https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz | tar -xz
+          sudo mv linux-amd64/helm /usr/local/bin/helm
+          curl -fsSL -o kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          sudo install -m 0755 kubectl /usr/local/bin/kubectl
+          curl -fsSL "https://github.com/eksctl-io/eksctl/releases/download/v0.231.0/eksctl_Linux_amd64.tar.gz" | tar -xz
+          sudo mv eksctl /usr/local/bin/eksctl
+
+      - name: Tenants
+        run: bash scripts/aws-demo
+
+      - name: Delete cluster
+        if: always()
+        run: eksctl delete cluster --name "${CLUSTER}" --region "${AWS_REGION}" --wait --disable-nodegroup-eviction
