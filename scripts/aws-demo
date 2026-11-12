@@ -62,9 +62,11 @@ say "cluster"
 eksctl create cluster --config-file "${ROOT}/platform/eksctl.yaml"
 aws eks update-kubeconfig --name "${CLUSTER}" --region "${REGION}" >/dev/null
 
-# The addon value is the switch. Fail here if the agent never started.
+# The addon value is the switch. The agent container was renamed; either name means policy is on.
 k -n kube-system rollout status daemonset/aws-node --timeout=300s
-if ! k -n kube-system get daemonset aws-node -o jsonpath='{.spec.template.spec.containers[*].name}' | grep -q network-policy-agent; then
+agents=$(k -n kube-system get daemonset aws-node -o jsonpath='{.spec.template.spec.containers[*].name}')
+echo "aws-node containers: ${agents}"
+if ! printf '%s\n' "${agents}" | grep -Eq 'network-policy-agent|aws-eks-nodeagent'; then
   echo "vpc-cni is not enforcing network policy" >&2
   exit 1
 fi
