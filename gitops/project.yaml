@@ -1,0 +1,17 @@
+# A tenant Application may create a Namespace and nothing else at cluster
+# scope. ClusterRole, the CNI, and the load balancer are not on this list.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: tenants
+  namespace: argocd
+spec:
+  description: Tenant files from this repository only.
+  sourceRepos:
+    - https://github.com/hmerkieiev/platform-tenants.git
+  destinations:
+    - namespace: tenant-*
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: tenant
+description: The only way a tenant namespace is rendered.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

@@ -1,0 +1,7 @@
+name: ""
+host: ""
+image: ""
+quota:
+  pods: ""
+  cpu: ""
+  memory: ""

@@ -1,0 +1,8 @@
+name: sample
+host: sample.demo.test
+image: platform-tenants-app:1.0.0
+cni: calico
+quota:
+  pods: "4"
+  cpu: 500m
+  memory: 256Mi

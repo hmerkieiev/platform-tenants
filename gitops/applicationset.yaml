@@ -1,0 +1,41 @@
+# One tenant file becomes one Application. Nested quota keys are flattened
+# by the git file generator, so the template reads them as quota.pods.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: tenants
+  namespace: argocd
+spec:
+  generators:
+    - git:
+        repoURL: https://github.com/hmerkieiev/platform-tenants.git
+        revision: main
+        files:
+          - path: tenants/*.yaml
+  template:
+    metadata:
+      name: 'tenant-{{.name}}'
+    spec:
+      project: tenants
+      source:
+        repoURL: https://github.com/hmerkieiev/platform-tenants.git
+        targetRevision: main
+        path: charts/tenant
+        helm:
+          values: |
+            name: '{{.name}}'
+            host: '{{.host}}'
+            image: '{{.image}}'
+            quota:
+              pods: '{{index . "quota.pods"}}'
+              cpu: '{{index . "quota.cpu"}}'
+              memory: '{{index . "quota.memory"}}'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: 'tenant-{{.name}}'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true

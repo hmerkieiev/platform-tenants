@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: app
+  namespace: {{ include "tenant.ns" . }}
+  labels:
+    app.kubernetes.io/name: app
+    {{- include "tenant.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: app
+    app.kubernetes.io/instance: {{ .Values.name }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+  namespace: {{ include "tenant.ns" . }}
+  labels:
+    app.kubernetes.io/name: app
+    {{- include "tenant.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: app
+      app.kubernetes.io/instance: {{ .Values.name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: app
+        app.kubernetes.io/instance: {{ .Values.name }}
+    spec:
+      automountServiceAccountToken: false
+      # ndots of 2 keeps redis-sessions.internal on the search path.
+      # At 1, a name that already contains a dot is looked up as a final name.
+      dnsPolicy: ClusterFirst
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "2"
+      containers:
+        - name: app
+          image: {{ .Values.image | quote }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: TENANT
+              value: {{ .Values.name | quote }}
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 2
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 65534

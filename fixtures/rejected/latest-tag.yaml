@@ -1,0 +1,7 @@
+name: sample
+host: sample.demo.test
+image: platform-tenants-app:latest
+quota:
+  pods: "4"
+  cpu: 500m
+  memory: 256Mi

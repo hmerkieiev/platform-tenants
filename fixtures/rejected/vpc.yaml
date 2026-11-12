@@ -1,0 +1,8 @@
+name: sample
+host: sample.demo.test
+image: platform-tenants-app:1.0.0
+vpcCidr: 10.200.0.0/16
+quota:
+  pods: "4"
+  cpu: 500m
+  memory: 256Mi

@@ -1,0 +1,367 @@
+#!/usr/bin/env python3
+"""Validate tenant files and render the tenant chart.
+
+A tenant file is the only change a team is allowed to commit. The chart is
+the platform. Helm ignores unknown keys, so these checks run first.
+"""
+
+import argparse
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+ALLOWED = ("name", "host", "image", "quota")
+QUOTA_KEYS = ("pods", "cpu", "memory")
+RESERVED = {
+    "internal",
+    "default",
+    "platform",
+    "kube-system",
+    "kube-public",
+    "kube-node-lease",
+    "ingress-nginx",
+    "calico-system",
+    "argocd",
+}
+NAME_RE = re.compile(r"^[a-z][a-z0-9]{2,15}$")
+HOST_RE = re.compile(r"^[a-z0-9-]+\.demo\.test$")
+IMAGE_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9][A-Za-z0-9._-]*$")
+ALLOWED_KINDS = {
+    "Namespace",
+    "ResourceQuota",
+    "LimitRange",
+    "NetworkPolicy",
+    "Service",
+    "Deployment",
+    "Ingress",
+}
+
+
+class TenantError(Exception):
+    def __init__(self, errors):
+        super().__init__("\n".join(errors))
+        self.errors = errors
+
+
+def unquote(value):
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+        return value[1:-1]
+    return value
+
+
+def parse_tenant(text, label):
+    if "\t" in text:
+        raise TenantError([f"{label}: tabs are not allowed"])
+    data = {}
+    quota = None
+    seen = set()
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            if raw.startswith(" ") or raw.startswith("\t"):
+                raise TenantError([f"{label}:{lineno}: unexpected indent"])
+            continue
+        if raw.startswith("  "):
+            if quota is None:
+                raise TenantError([f"{label}:{lineno}: unexpected indent"])
+            key, value = split_pair(raw.strip(), label, lineno)
+            if key in quota:
+                raise TenantError([f"{label}:{lineno}: duplicate key {key}"])
+            if key not in QUOTA_KEYS:
+                raise TenantError([f"{label}:{lineno}: unknown quota key {key}"])
+            if value == "":
+                raise TenantError([f"{label}:{lineno}: {key} needs a value"])
+            quota[key] = unquote(value)
+            continue
+        if raw[0].isspace():
+            raise TenantError([f"{label}:{lineno}: unexpected indent"])
+        key, value = split_pair(raw, label, lineno)
+        if key in seen:
+            raise TenantError([f"{label}:{lineno}: duplicate key {key}"])
+        seen.add(key)
+        if key not in ALLOWED:
+            raise TenantError([f"{label}:{lineno}: unknown key {key}"])
+        if key == "quota":
+            if value != "":
+                raise TenantError([f"{label}:{lineno}: quota must be a map"])
+            quota = {}
+            data["quota"] = quota
+            continue
+        if value == "":
+            raise TenantError([f"{label}:{lineno}: {key} needs a value"])
+        data[key] = unquote(value)
+    missing = [key for key in ALLOWED if key not in data]
+    if missing:
+        raise TenantError([f"{label}: missing {', '.join(missing)}"])
+    missing_quota = [key for key in QUOTA_KEYS if key not in data["quota"]]
+    if missing_quota:
+        raise TenantError([f"{label}: missing quota.{', quota.'.join(missing_quota)}"])
+    check_fields(data, label)
+    return data
+
+
+def split_pair(raw, label, lineno):
+    if ":" not in raw:
+        raise TenantError([f"{label}:{lineno}: expected key: value"])
+    key, value = raw.split(":", 1)
+    if not key or " " in key:
+        raise TenantError([f"{label}:{lineno}: bad key"])
+    return key, value.strip()
+
+
+def check_fields(data, label):
+    name = data["name"]
+    if not NAME_RE.fullmatch(name):
+        raise TenantError([f"{label}: name must be a short lowercase word"])
+    if name in RESERVED:
+        raise TenantError([f"{label}: name {name} is reserved"])
+    if not HOST_RE.fullmatch(data["host"]):
+        raise TenantError([f"{label}: host must be under demo.test"])
+    image = data["image"]
+    if not IMAGE_RE.fullmatch(image):
+        raise TenantError([f"{label}: image needs a pinned tag"])
+    if image.rsplit(":", 1)[1] == "latest":
+        raise TenantError([f"{label}: image tag latest is not a release"])
+    pods, cpu, memory = data["quota"]["pods"], data["quota"]["cpu"], data["quota"]["memory"]
+    if not re.fullmatch(r"[1-9][0-9]*", pods):
+        raise TenantError([f"{label}: quota.pods must be a number"])
+    if not 2 <= int(pods) <= 10:
+        raise TenantError([f"{label}: quota.pods must be from 2 to 10"])
+    if not re.fullmatch(r"[1-9][0-9]*m", cpu):
+        raise TenantError([f"{label}: quota.cpu must be millicores, such as 500m"])
+    if not 200 <= int(cpu[:-1]) <= 2000:
+        raise TenantError([f"{label}: quota.cpu must be from 200m to 2000m"])
+    if not re.fullmatch(r"[1-9][0-9]*Mi", memory):
+        raise TenantError([f"{label}: quota.memory must be mebibytes, such as 256Mi"])
+    if not 128 <= int(memory[:-2]) <= 1024:
+        raise TenantError([f"{label}: quota.memory must be from 128Mi to 1024Mi"])
+
+
+def emit(data):
+    quota = data["quota"]
+    return (
+        f"name: {data['name']}\n"
+        f"host: {data['host']}\n"
+        f"image: {data['image']}\n"
+        "quota:\n"
+        f"  pods: \"{quota['pods']}\"\n"
+        f"  cpu: {quota['cpu']}\n"
+        f"  memory: {quota['memory']}\n"
+    )
+
+
+def load_dir(path, match_names):
+    files = sorted(path.glob("*.yaml"))
+    if not files:
+        raise TenantError([f"{path}: no tenant files"])
+    docs = []
+    for path_item in files:
+        data = parse_tenant(path_item.read_text(), path_item.name)
+        if match_names and path_item.stem != data["name"]:
+            raise TenantError([f"{path_item.name}: name {data['name']} does not match the file"])
+        docs.append(data)
+    names = {}
+    hosts = {}
+    errors = []
+    for data in docs:
+        if data["name"] in names:
+            errors.append(f"name {data['name']} is repeated")
+        names[data["name"]] = True
+        if data["host"] in hosts:
+            errors.append(f"host {data['host']} is repeated")
+        hosts[data["host"]] = True
+    if errors:
+        raise TenantError(errors)
+    return docs
+
+
+def helm_template(path):
+    proc = subprocess.run(
+        ["helm", "template", "tenant", str(ROOT / "charts" / "tenant"), "-f", str(path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return proc
+
+
+def documents(text):
+    chunks = []
+    current = []
+    for line in text.splitlines():
+        if line.strip() == "---":
+            chunks.append("\n".join(current))
+            current = []
+        else:
+            current.append(line)
+    chunks.append("\n".join(current))
+    parsed = []
+    for chunk in chunks:
+        kind = name = namespace = None
+        in_meta = False
+        for line in chunk.splitlines():
+            if not line.strip() or line.startswith("#"):
+                continue
+            if line.startswith("kind:"):
+                kind = line.split(":", 1)[1].strip()
+            elif line.startswith("metadata:"):
+                in_meta = True
+            elif in_meta and line.startswith("  name:"):
+                name = unquote(line.split(":", 1)[1].strip())
+            elif in_meta and line.startswith("  namespace:"):
+                namespace = unquote(line.split(":", 1)[1].strip())
+            elif in_meta and line[0] != " ":
+                in_meta = False
+        if kind:
+            parsed.append((kind, name, namespace))
+    return parsed
+
+
+def assert_render(name, text):
+    docs = documents(text)
+    kinds = [kind for kind, _, _ in docs]
+    errors = []
+    for kind in kinds:
+        if kind not in ALLOWED_KINDS:
+            errors.append(f"{name}: chart rendered {kind}")
+    namespaces = [doc_name for kind, doc_name, _ in docs if kind == "Namespace"]
+    if namespaces != [f"tenant-{name}"]:
+        errors.append(f"{name}: expected namespace tenant-{name}, got {namespaces}")
+    internal = [
+        namespace
+        for kind, doc_name, namespace in docs
+        if kind == "Service" and doc_name == "internal"
+    ]
+    if internal != [f"tenant-{name}"]:
+        errors.append(f"{name}: Redis Service internal is not in tenant-{name}")
+    if "redis-sessions" not in text or 'value: "2"' not in text:
+        errors.append(f"{name}: Redis hostname or ndots is missing")
+    if kinds.count("Deployment") != 2 or kinds.count("Ingress") != 1:
+        errors.append(f"{name}: expected the app, Redis, and one ingress")
+    return errors
+
+
+def tenants_dir(args):
+    if getattr(args, "tenants", None):
+        return args.tenants
+    return ROOT / "tenants"
+
+
+def cmd_check(args):
+    errors = []
+    try:
+        load_dir(tenants_dir(args), match_names=True)
+    except TenantError as exc:
+        errors.extend(exc.errors)
+    rejected = ROOT / "fixtures" / "rejected"
+    for path in sorted(rejected.glob("*.yaml")):
+        try:
+            parse_tenant(path.read_text(), path.name)
+        except TenantError:
+            continue
+        errors.append(f"fixture {path.name} was accepted")
+    for path in sorted((ROOT / "fixtures" / "rejected-sets").iterdir()):
+        if not path.is_dir():
+            continue
+        try:
+            load_dir(path, match_names=True)
+        except TenantError:
+            continue
+        errors.append(f"fixture set {path.name} was accepted")
+    if errors:
+        raise SystemExit("\n".join(errors))
+    render_errors = []
+    for path in sorted(tenants_dir(args).glob("*.yaml")):
+        data = parse_tenant(path.read_text(), path.name)
+        proc = helm_template(path)
+        if proc.returncode != 0:
+            raise SystemExit(f"helm template {path.name} failed\n{proc.stderr}")
+        render_errors.extend(assert_render(data["name"], proc.stdout))
+    for name in ("internal-name.yaml", "latest-tag.yaml"):
+        proc = helm_template(rejected / name)
+        if proc.returncode == 0:
+            render_errors.append(f"chart rendered {name}")
+    if render_errors:
+        raise SystemExit("\n".join(render_errors))
+    print("check ok")
+
+
+def cmd_render(args):
+    parts = []
+    for path in sorted(tenants_dir(args).glob("*.yaml")):
+        parse_tenant(path.read_text(), path.name)
+        proc = helm_template(path)
+        if proc.returncode != 0:
+            raise SystemExit(f"helm template {path.name} failed\n{proc.stderr}")
+        parts.append(proc.stdout)
+    sys.stdout.write("\n".join(parts))
+    if parts and not parts[-1].endswith("\n"):
+        sys.stdout.write("\n")
+
+
+def cmd_create(args):
+    data = {
+        "name": args.name,
+        "host": args.host,
+        "image": args.image,
+        "quota": {"pods": args.pods, "cpu": args.cpu, "memory": args.memory},
+    }
+    text = emit(data)
+    parse_tenant(text, f"{args.name}.yaml")
+    dest = tenants_dir(args) / f"{args.name}.yaml"
+    if dest.exists():
+        raise SystemExit(f"{dest} already exists")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(text)
+    print(dest)
+
+
+def cmd_set_image(args):
+    path = tenants_dir(args) / f"{args.name}.yaml"
+    data = parse_tenant(path.read_text(), path.name)
+    if path.stem != data["name"]:
+        raise SystemExit(f"{path.name}: name {data['name']} does not match the file")
+    data["image"] = args.image
+    text = emit(data)
+    parse_tenant(text, path.name)
+    path.write_text(text)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Tenant file contract")
+    commands = parser.add_subparsers(dest="cmd", required=True)
+
+    check = commands.add_parser("check")
+    check.add_argument("--tenants", type=Path)
+    check.set_defaults(func=cmd_check)
+
+    render = commands.add_parser("render")
+    render.add_argument("--tenants", type=Path)
+    render.set_defaults(func=cmd_render)
+
+    tenant = commands.add_parser("tenant")
+    tenant_commands = tenant.add_subparsers(dest="tenant_cmd", required=True)
+
+    create = tenant_commands.add_parser("create")
+    create.add_argument("name")
+    create.add_argument("--host", required=True)
+    create.add_argument("--image", required=True)
+    create.add_argument("--pods", required=True)
+    create.add_argument("--cpu", required=True)
+    create.add_argument("--memory", required=True)
+    create.add_argument("--tenants", type=Path)
+    create.set_defaults(func=cmd_create)
+
+    set_image = tenant_commands.add_parser("set-image")
+    set_image.add_argument("name")
+    set_image.add_argument("image")
+    set_image.add_argument("--tenants", type=Path)
+    set_image.set_defaults(func=cmd_set_image)
+
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,295 @@
+#!/usr/bin/env bash
+# Raise one cluster and run both tenant checks.
+# The previous kubectl context is restored on the way out.
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT"
+export PATH="${HOME}/.local/bin:${PATH}"
+
+CLUSTER=platform-tenants
+CONTEXT="kind-${CLUSTER}"
+# shellcheck disable=SC1091
+. "${ROOT}/platform/versions.env"
+HOST_PORT=$(awk '/hostPort:/{print $2; exit}' "${ROOT}/kind/cluster.yaml")
+BIRCH="${ROOT}/tenants/birch.yaml"
+TMP=""
+previous_context=$(kubectl config current-context 2>/dev/null || true)
+
+k() {
+  kubectl --context "${CONTEXT}" "$@"
+}
+
+say() {
+  printf '\n== %s\n' "$*"
+}
+
+cleanup() {
+  rm -f "${BIRCH}"
+  if [[ -n "${TMP}" ]]; then
+    rm -rf "${TMP}"
+  fi
+  if [[ -n "${previous_context}" ]]; then
+    kubectl config use-context "${previous_context}" >/dev/null 2>&1 || true
+  fi
+}
+
+debug_dump() {
+  k get pods -A -o wide >&2 || true
+  k get ingress -A >&2 || true
+  k get netpol -A >&2 || true
+}
+
+if [[ "${1:-}" == "down" ]]; then
+  kind delete cluster --name "${CLUSTER}"
+  rm -f "${BIRCH}"
+  exit 0
+fi
+
+trap cleanup EXIT
+
+os_name() {
+  uname -s | tr '[:upper:]' '[:lower:]'
+}
+
+cpu_name() {
+  case $(uname -m) in
+    arm64 | aarch64) printf 'arm64\n' ;;
+    x86_64 | amd64) printf 'amd64\n' ;;
+    *)
+      echo "unsupported architecture $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+}
+
+ensure_kind() {
+  if command -v kind >/dev/null 2>&1; then
+    return 0
+  fi
+  mkdir -p "${HOME}/.local/bin"
+  curl -fsSL -o "${HOME}/.local/bin/kind" \
+    "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-$(os_name)-$(cpu_name)"
+  chmod +x "${HOME}/.local/bin/kind"
+  hash -r
+}
+
+ensure_kubectl() {
+  if command -v kubectl >/dev/null 2>&1; then
+    return 0
+  fi
+  mkdir -p "${HOME}/.local/bin"
+  curl -fsSL -o "${HOME}/.local/bin/kubectl" \
+    "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/$(os_name)/$(cpu_name)/kubectl"
+  chmod +x "${HOME}/.local/bin/kubectl"
+  hash -r
+}
+
+if ! docker info >/dev/null 2>&1; then
+  echo "docker is not running" >&2
+  exit 1
+fi
+
+ensure_kind
+ensure_kubectl
+command -v helm >/dev/null 2>&1 || {
+  echo "helm is required" >&2
+  exit 1
+}
+command -v python3 >/dev/null 2>&1 || {
+  echo "python3 is required" >&2
+  exit 1
+}
+
+say "check the tenant contract"
+python3 "${ROOT}/scripts/platform" check
+
+say "cluster"
+if kind get clusters 2>/dev/null | grep -qx "${CLUSTER}"; then
+  if [[ "${DEMO_REUSE:-}" != "1" ]]; then
+    kind delete cluster --name "${CLUSTER}"
+    kind create cluster --config "${ROOT}/kind/cluster.yaml"
+  fi
+else
+  kind create cluster --config "${ROOT}/kind/cluster.yaml"
+fi
+
+apply_url() {
+  local url=$1
+  local attempt
+  for attempt in 1 2 3 4 5 6 7 8; do
+    if k apply --server-side --force-conflicts -f "${url}"; then
+      return 0
+    fi
+    sleep 5
+  done
+  return 1
+}
+
+say "calico"
+apply_url "https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml"
+# Docker's bridge drops Calico traffic unless Felix ignores the reverse-path check.
+k -n kube-system set env daemonset/calico-node FELIX_IGNORELOOSERPF=true >/dev/null
+k -n kube-system rollout status daemonset/calico-node --timeout=300s
+k wait --for=condition=Ready nodes --all --timeout=300s
+k -n kube-system rollout status deploy/coredns --timeout=180s
+
+say "ingress"
+k label node "${CLUSTER}-control-plane" ingress-ready=true --overwrite >/dev/null
+apply_url "https://raw.githubusercontent.com/kubernetes/ingress-nginx/${INGRESS_NGINX_VERSION}/deploy/static/provider/kind/deploy.yaml"
+k -n ingress-nginx rollout status deploy/ingress-nginx-controller --timeout=300s
+
+say "app images"
+docker build --build-arg APP_VERSION=1.0.0 -t platform-tenants-app:1.0.0 "${ROOT}/images/app"
+docker build --build-arg APP_VERSION=1.1.0 -t platform-tenants-app:1.1.0 "${ROOT}/images/app"
+kind load docker-image platform-tenants-app:1.0.0 --name "${CLUSTER}"
+kind load docker-image platform-tenants-app:1.1.0 --name "${CLUSTER}"
+
+apply_dir() {
+  local dir=$1
+  local manifest attempt
+  manifest=$(python3 "${ROOT}/scripts/platform" render --tenants "${dir}")
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if printf '%s\n' "${manifest}" | k apply -f -; then
+      return 0
+    fi
+    sleep 5
+  done
+  debug_dump
+  return 1
+}
+
+wait_tenant() {
+  local name=$1
+  if ! k -n "tenant-${name}" rollout status deploy/app --timeout=180s; then
+    debug_dump
+    return 1
+  fi
+  if ! k -n "tenant-${name}" rollout status deploy/redis --timeout=180s; then
+    debug_dump
+    return 1
+  fi
+}
+
+wait_http() {
+  local host=$1
+  local expect=$2
+  local attempt body
+  body=""
+  for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+    body=$(curl -fsS --max-time 2 -H "Host: ${host}" "http://127.0.0.1:${HOST_PORT}/" 2>/dev/null || true)
+    if [[ "${body}" == "${expect}" ]]; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "expected ${host} to serve [${expect}], last body [${body}]" >&2
+  debug_dump
+  return 1
+}
+
+deny_redis() {
+  local from=$1
+  local to=$2
+  local host="redis-sessions.internal.tenant-${to}.svc.cluster.local"
+  local out rc
+  set +e
+  out=$(k -n "tenant-${from}" exec deploy/redis -- timeout 4 redis-cli -h "${host}" ping 2>&1)
+  rc=$?
+  set -e
+  case "${out}" in
+    *PONG*)
+      echo "${from} opened Redis in ${to}" >&2
+      debug_dump
+      exit 1
+      ;;
+    *"command terminated"*|*"Connection refused"*|*"Could not connect"*|*"timeout"*|*"Timeout"*)
+      ;;
+    *)
+      echo "unexpected Redis probe from ${from} to ${to} (${rc}): ${out}" >&2
+      debug_dump
+      exit 1
+      ;;
+  esac
+}
+
+own_redis() {
+  local name=$1
+  local out
+  out=$(k -n "tenant-${name}" exec deploy/redis -- redis-cli -h redis-sessions.internal ping)
+  case "${out}" in
+    *PONG*) ;;
+    *)
+      echo "${name} cannot reach its own Redis: ${out}" >&2
+      debug_dump
+      exit 1
+      ;;
+  esac
+}
+
+platform_images() {
+  k -n ingress-nginx get deploy ingress-nginx-controller \
+    -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+  k -n kube-system get daemonset calico-node \
+    -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+}
+
+say "cedar and maple"
+apply_dir "${ROOT}/tenants"
+wait_tenant cedar
+wait_tenant maple
+wait_http cedar.demo.test "cedar 1.0.0"
+wait_http maple.demo.test "maple 1.0.0"
+own_redis cedar
+own_redis maple
+deny_redis cedar maple
+deny_redis maple cedar
+before=$(platform_images)
+
+say "scenario 1: a new tenant file"
+python3 "${ROOT}/scripts/platform" tenant create birch \
+  --host birch.demo.test \
+  --image platform-tenants-app:1.0.0 \
+  --pods 4 \
+  --cpu 500m \
+  --memory 256Mi
+python3 "${ROOT}/scripts/platform" check
+apply_dir "${ROOT}/tenants"
+wait_tenant birch
+wait_http birch.demo.test "birch 1.0.0"
+wait_http cedar.demo.test "cedar 1.0.0"
+deny_redis birch cedar
+deny_redis cedar birch
+echo "scenario 1 ok"
+
+say "scenario 2: one image bump"
+TMP=$(mktemp -d)
+cp "${ROOT}"/tenants/*.yaml "${TMP}/"
+python3 "${ROOT}/scripts/platform" tenant set-image cedar platform-tenants-app:1.1.0 --tenants "${TMP}"
+apply_dir "${TMP}"
+wait_tenant cedar
+wait_http cedar.demo.test "cedar 1.1.0"
+wait_http maple.demo.test "maple 1.0.0"
+wait_http birch.demo.test "birch 1.0.0"
+after=$(platform_images)
+if [[ "${before}" != "${after}" ]]; then
+  echo "platform images changed" >&2
+  printf 'before:\n%s\nafter:\n%s\n' "${before}" "${after}" >&2
+  exit 1
+fi
+echo "scenario 2 ok"
+
+say "restore the committed tenants"
+rm -f "${BIRCH}"
+apply_dir "${ROOT}/tenants"
+k delete namespace tenant-birch --wait=true
+wait_tenant cedar
+wait_http cedar.demo.test "cedar 1.0.0"
+
+if [[ "${DEMO_DOWN:-}" == "1" ]]; then
+  kind delete cluster --name "${CLUSTER}"
+fi
+
+echo
+echo "demo ok"
+echo "curl -H 'Host: cedar.demo.test' http://127.0.0.1:${HOST_PORT}/"
