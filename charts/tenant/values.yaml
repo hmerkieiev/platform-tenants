@@ -1,6 +1,8 @@
 name: ""
 host: ""
 image: ""
+# Kind renders the namespace. The isolated tenant stack sets this false.
+createNamespace: true
 quota:
   pods: ""
   cpu: ""

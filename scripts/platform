@@ -21,7 +21,7 @@ RESERVED = {
     "kube-system",
     "kube-public",
     "kube-node-lease",
-    "ingress-nginx",
+    "traefik",
     "calico-system",
     "argocd",
 }

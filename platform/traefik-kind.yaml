@@ -1,0 +1,30 @@
+# The kind node publishes container port 8000 as host port 8090.
+# One replica can bind that port, and only the labeled node has the mapping.
+deployment:
+  replicas: 1
+ingressClass:
+  enabled: true
+  isDefaultClass: true
+  name: traefik
+providers:
+  kubernetesIngress:
+    ingressClass: traefik
+  kubernetesGateway:
+    enabled: false
+gateway:
+  enabled: false
+gatewayClass:
+  enabled: false
+ports:
+  web:
+    asDefault: true
+    port: 8000
+    hostPort: 8000
+  websecure:
+    expose:
+      default: false
+service:
+  spec:
+    type: ClusterIP
+nodeSelector:
+  ingress-ready: "true"

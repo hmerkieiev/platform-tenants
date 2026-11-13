@@ -1,0 +1,9 @@
+name  = "cedar"
+host  = "cedar.demo.test"
+image = "platform-tenants-app:1.0.0"
+
+quota = {
+  pods   = "4"
+  cpu    = "500m"
+  memory = "256Mi"
+}

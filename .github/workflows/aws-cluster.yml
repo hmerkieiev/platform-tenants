@@ -14,6 +14,7 @@ jobs:
     env:
       AWS_REGION: eu-north-1
       CLUSTER: platform-tenants
+      TF_IN_AUTOMATION: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -26,16 +27,25 @@ jobs:
 
       - name: Install tools
         run: |
+          curl -fsSL -o terraform.zip "https://releases.hashicorp.com/terraform/1.14.3/terraform_1.14.3_linux_amd64.zip"
+          sudo unzip -o terraform.zip -d /usr/local/bin
           curl -fsSL https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz | tar -xz
           sudo mv linux-amd64/helm /usr/local/bin/helm
-          curl -fsSL -o kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          curl -fsSL -o kubectl "https://dl.k8s.io/release/v1.32.2/bin/linux/amd64/kubectl"
           sudo install -m 0755 kubectl /usr/local/bin/kubectl
-          curl -fsSL "https://github.com/eksctl-io/eksctl/releases/download/v0.231.0/eksctl_Linux_amd64.tar.gz" | tar -xz
-          sudo mv eksctl /usr/local/bin/eksctl
+
+      - name: Apply the cluster
+        run: |
+          terraform -chdir=terraform/cluster init -input=false
+          terraform -chdir=terraform/cluster apply -input=false -auto-approve -var install_platform=false
+          terraform -chdir=terraform/cluster apply -input=false -auto-approve -var install_platform=true
+          aws eks update-kubeconfig --name "${CLUSTER}" --region "${AWS_REGION}" >/dev/null
 
       - name: Tenants
         run: bash scripts/aws-demo
 
-      - name: Delete cluster
+      - name: Destroy the cluster
         if: always()
-        run: eksctl delete cluster --name "${CLUSTER}" --region "${AWS_REGION}" --wait --disable-nodegroup-eviction
+        run: |
+          terraform -chdir=terraform/cluster init -input=false
+          terraform -chdir=terraform/cluster destroy -input=false -auto-approve

@@ -1,3 +1,4 @@
+{{- if .Values.createNamespace }}
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -6,3 +7,4 @@ metadata:
     platform-tenants/tenant: {{ .Values.name | quote }}
     pod-security.kubernetes.io/enforce: baseline
     {{- include "tenant.labels" . | nindent 4 }}
+{{- end }}

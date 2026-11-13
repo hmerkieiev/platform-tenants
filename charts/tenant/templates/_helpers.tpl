@@ -2,7 +2,7 @@
 {{- if not (regexMatch "^[a-z][a-z0-9]{2,15}$" .Values.name) -}}
 {{- fail "name must be a short lowercase word" -}}
 {{- end -}}
-{{- if has .Values.name (list "internal" "default" "platform" "kube-system" "kube-public" "kube-node-lease" "ingress-nginx" "calico-system" "argocd") -}}
+{{- if has .Values.name (list "internal" "default" "platform" "kube-system" "kube-public" "kube-node-lease" "traefik" "calico-system" "argocd") -}}
 {{- fail "that name is reserved by the platform" -}}
 {{- end -}}
 {{- if not (regexMatch "^[a-z0-9-]+\\.demo\\.test$" .Values.host) -}}

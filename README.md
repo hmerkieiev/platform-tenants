@@ -18,7 +18,7 @@ quota:
   memory: 256Mi
 ```
 
-`charts/tenant` renders the namespace, the quota, a default-deny NetworkPolicy, Redis, the app, and an ingress. Platform addons (Calico, ingress-nginx) are installed by `scripts/demo` from pinned URLs. The tenant chart does not render them.
+`charts/tenant` renders the namespace, the quota, a default-deny NetworkPolicy, Redis, the app, and an ingress. Platform addons (Calico, Traefik) are installed by `scripts/demo`. The tenant chart does not render them.
 
 `gitops/project.yaml` is the same rule for Argo CD: a tenant Application may create a Namespace, and no other cluster-scoped kind. `gitops/applicationset.yaml` turns one file into one Application. The local demo applies the chart itself, so it can run before this repository has a remote.
 
@@ -43,13 +43,13 @@ Redis has no password. The wall is the policy: a pod may talk to pods in its own
 
 The fixed name is `redis-sessions.internal`. It resolves because the pod hostname is `redis-sessions` and the headless Service in that namespace is named `internal`. Tenant pods use `dnsPolicy: ClusterFirst` and `ndots` of 2. At `ndots` 1, a name that already contains a dot is looked up as a final name and misses the search path.
 
-The name `internal` is reserved. A namespace with that name would make `redis-sessions.internal` a cluster-wide record and steal every tenant's Redis. The chart also prefixes namespaces with `tenant-`, so a tenant file cannot occupy `ingress-nginx` or `internal` even if the denylist were bypassed.
+The name `internal` is reserved. A namespace with that name would make `redis-sessions.internal` a cluster-wide record and steal every tenant's Redis. The chart also prefixes namespaces with `tenant-`, so a tenant file cannot occupy `traefik` or `internal` even if the denylist were bypassed.
 
 Quota has a floor of 2 pods, 200m, and 128Mi, because the tenant runs an app and Redis. The tag `latest` is not a release.
 
 ## Run
 
-Docker, kubectl, Helm, and Python 3. `scripts/demo` downloads kind if it is missing. The first run pulls Calico, ingress-nginx, and the Redis image.
+Docker, kubectl, Helm, and Python 3. `scripts/demo` downloads kind if it is missing. The first run pulls Calico, Traefik, and the Redis image.
 
 ```sh
 scripts/demo
@@ -66,11 +66,11 @@ kubectl --context kind-platform-tenants get ns
 Green means both of these held:
 
 1. `birch` appeared from one new file, answered on `birch.demo.test`, and could not open cedar's Redis. Cedar was unchanged.
-2. Cedar's image moved to `1.1.0`. Maple and birch stayed on `1.0.0`. The ingress-nginx and Calico images stayed put.
+2. Cedar's image moved to `1.1.0`. Maple and birch stayed on `1.0.0`. The Traefik and Calico images stayed put.
 
 `scripts/platform check` is the same contract without a cluster. It is the fast half of the script.
 
-On an account, the CNI and the load balancer change. The tenant file does not. See [docs/aws.md](docs/aws.md).
+On an account, two Terraform roots replace the cluster bootstrap. `terraform/cluster` is the network, the cluster, and Traefik. `terraform/tenant` opens one namespace, and `terraform/tenant/isolated` installs that tenant's chart in its own state. The tenant file does not choose the CNI or the load balancer. See [docs/aws.md](docs/aws.md).
 
 ## License
 

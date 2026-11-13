@@ -136,8 +136,14 @@ k -n kube-system rollout status deploy/coredns --timeout=180s
 
 say "ingress"
 k label node "${CLUSTER}-control-plane" ingress-ready=true --overwrite >/dev/null
-apply_url "https://raw.githubusercontent.com/kubernetes/ingress-nginx/${INGRESS_NGINX_VERSION}/deploy/static/provider/kind/deploy.yaml"
-k -n ingress-nginx rollout status deploy/ingress-nginx-controller --timeout=300s
+helm repo add traefik https://traefik.github.io/charts --force-update >/dev/null
+helm upgrade --install traefik traefik/traefik \
+  --namespace traefik --create-namespace \
+  --version "${TRAEFIK_CHART_VERSION}" \
+  --values "${ROOT}/platform/traefik-kind.yaml" \
+  --kube-context "${CONTEXT}" \
+  --wait --timeout 5m
+k -n traefik rollout status deploy/traefik --timeout=300s
 
 say "app images"
 docker build --build-arg APP_VERSION=1.0.0 -t platform-tenants-app:1.0.0 "${ROOT}/images/app"
@@ -228,7 +234,7 @@ own_redis() {
 }
 
 platform_images() {
-  k -n ingress-nginx get deploy ingress-nginx-controller \
+  k -n traefik get deploy traefik \
     -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
   k -n kube-system get daemonset calico-node \
     -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'

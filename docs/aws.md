@@ -8,6 +8,8 @@ Adopting a VPC that already has an internet gateway is a separate change from ad
 
 CI on `main` assumes the role `platform-tenants-ci` through GitHub's OIDC provider. The trust is this repository and that one branch. The subject is the immutable form GitHub issues for this repository. The role ARN is a GitHub variable, so this tree still has no account identifier. `.github/workflows/aws-identity.yml` checks that the assume succeeds.
 
-`.github/workflows/aws-cluster.yml` is a manual run. It raises one cluster from `platform/eksctl.yaml`, applies cedar and maple, adds birch from one file, bumps cedar's image, and deletes the cluster before the job ends. Nodes sit in one zone behind one NAT. The ingress controller is published with a network load balancer. A tenant file still names only its image tag; the account registry is added when the manifest is applied.
+`.github/workflows/aws-cluster.yml` is a manual run. It applies `terraform/cluster`, runs the tenant checks, and destroys that stack before the job ends. The first apply creates the network and the cluster with `install_platform` false. The second apply installs Traefik, which is the platform application: tenant Ingress objects name the class `traefik` and do not install a controller. Nodes sit in one zone behind one NAT. The controller Service is a network load balancer.
+
+`terraform/tenant` opens one tenant. It creates the namespace `tenant-<name>` and records the host, the image, and the quota. `terraform/tenant/isolated` is a separate state that only installs `charts/tenant` into that namespace. It reads the tenant stack and has no VPC and no cluster resource. A second tenant is a second state of those two roots, not a second cluster. The workflow's checks still render the chart from the tenant files, so a new file and an image bump stay a chart apply. The role that applies the cluster is the role that calls the API.
 
 This repository does not contain that account.

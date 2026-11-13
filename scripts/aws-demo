@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
-# Raise the stand on the account's cluster and run both tenant checks.
-# The workflow deletes the cluster after this script, including when it fails.
+# Run both tenant checks on a cluster terraform/cluster already applied.
+# The workflow destroys that cluster after this script, including when it fails.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
-# shellcheck disable=SC1091
-. "${ROOT}/platform/versions.env"
 
 REGION="${AWS_REGION:-eu-north-1}"
-CLUSTER="${CLUSTER:-platform-tenants}"
 BIRCH="${ROOT}/tenants/birch.yaml"
 LB=""
 
@@ -38,8 +35,8 @@ command -v helm >/dev/null 2>&1 || {
   echo "helm is required" >&2
   exit 1
 }
-command -v eksctl >/dev/null 2>&1 || {
-  echo "eksctl is required" >&2
+command -v kubectl >/dev/null 2>&1 || {
+  echo "kubectl is required" >&2
   exit 1
 }
 
@@ -59,9 +56,6 @@ docker push "${REGISTRY}/platform-tenants-app:1.0.0"
 docker push "${REGISTRY}/platform-tenants-app:1.1.0"
 
 say "cluster"
-eksctl create cluster --config-file "${ROOT}/platform/eksctl.yaml"
-aws eks update-kubeconfig --name "${CLUSTER}" --region "${REGION}" >/dev/null
-
 # The addon value is the switch. The agent container was renamed; either name means policy is on.
 k -n kube-system rollout status daemonset/aws-node --timeout=300s
 agents=$(k -n kube-system get daemonset aws-node -o jsonpath='{.spec.template.spec.containers[*].name}')
@@ -71,28 +65,13 @@ if ! printf '%s\n' "${agents}" | grep -Eq 'network-policy-agent|aws-eks-nodeagen
   exit 1
 fi
 
-apply_url() {
-  local url=$1
-  local attempt
-  for attempt in 1 2 3 4 5 6 7 8; do
-    if k apply --server-side --force-conflicts -f "${url}"; then
-      return 0
-    fi
-    sleep 5
-  done
-  return 1
-}
-
 say "ingress"
-apply_url "https://raw.githubusercontent.com/kubernetes/ingress-nginx/${INGRESS_NGINX_VERSION}/deploy/static/provider/aws/deploy.yaml"
-# One controller replica and externalTrafficPolicy Local drops health checks on the other node.
-k -n ingress-nginx patch svc ingress-nginx-controller --type merge -p '{"spec":{"externalTrafficPolicy":"Cluster"}}'
-k -n ingress-nginx rollout status deploy/ingress-nginx-controller --timeout=300s
+k -n traefik rollout status deploy/traefik --timeout=300s
 
 say "load balancer"
 local_attempt=0
 for local_attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
-  LB=$(k -n ingress-nginx get svc ingress-nginx-controller -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+  LB=$(k -n traefik get svc traefik -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
   if [[ -n "${LB}" ]]; then
     break
   fi
@@ -190,7 +169,7 @@ own_redis() {
 }
 
 platform_images() {
-  k -n ingress-nginx get deploy ingress-nginx-controller \
+  k -n traefik get deploy traefik \
     -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
   k -n kube-system get daemonset aws-node \
     -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'

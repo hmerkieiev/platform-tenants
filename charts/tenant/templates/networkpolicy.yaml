@@ -43,7 +43,7 @@ spec:
         - podSelector: {}
 ---
 # The ingress controller is a pod with a host port. Its connection to the
-# app comes from the ingress-nginx namespace. Redis has no matching allow.
+# app comes from the traefik namespace. Redis has no matching allow.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -59,7 +59,7 @@ spec:
     - from:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: ingress-nginx
+              kubernetes.io/metadata.name: traefik
       ports:
         - protocol: TCP
           port: 8080
