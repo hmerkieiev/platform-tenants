@@ -10,11 +10,23 @@ permissions:
 jobs:
   whoami:
     runs-on: ubuntu-latest
+    env:
+      AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Mask the account
+        env:
+          AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+        run: bash .github/scripts/mask-account.sh
       - name: Assume role
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: eu-north-1
       - name: Caller
-        run: aws sts get-caller-identity --query Arn --output text
+        run: |
+          arn=$(aws sts get-caller-identity --query Arn --output text)
+          role=$(printf '%s' "$arn" | awk -F/ '{print $(NF-1)}')
+          test "$role" = "platform-tenants-ci"
+          echo "assumed platform-tenants-ci"

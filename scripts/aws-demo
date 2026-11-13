@@ -44,7 +44,13 @@ say "check the tenant contract"
 python3 "${ROOT}/scripts/platform" check
 
 say "images"
-ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+# The registry host contains the account id. In Actions that value is a secret,
+# so the log mask is already in place before docker prints the host.
+if [[ -n "${AWS_ACCOUNT_ID:-}" ]]; then
+  ACCOUNT="$AWS_ACCOUNT_ID"
+else
+  ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+fi
 REGISTRY="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com"
 if ! aws ecr describe-repositories --repository-names platform-tenants-app --region "${REGION}" >/dev/null 2>&1; then
   aws ecr create-repository --repository-name platform-tenants-app --region "${REGION}" >/dev/null
