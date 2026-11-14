@@ -11,9 +11,9 @@ variable "cluster_name" {
 }
 
 variable "kubernetes_version" {
-  description = "EKS Kubernetes version in standard support."
+  description = "EKS Kubernetes version in standard support. 1.36 stays in standard support through 2027-08-02. 1.34 leaves it on 2026-12-02."
   type        = string
-  default     = "1.35"
+  default     = "1.36"
 }
 
 variable "vpc_cidr" {

@@ -37,7 +37,7 @@ jobs:
           sudo unzip -o terraform.zip -d /usr/local/bin
           curl -fsSL https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz | tar -xz
           sudo mv linux-amd64/helm /usr/local/bin/helm
-          curl -fsSL -o kubectl "https://dl.k8s.io/release/v1.32.2/bin/linux/amd64/kubectl"
+          curl -fsSL -o kubectl "https://dl.k8s.io/release/v1.36.6/bin/linux/amd64/kubectl"
           sudo install -m 0755 kubectl /usr/local/bin/kubectl
 
       - name: Apply the cluster
